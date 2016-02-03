@@ -2,25 +2,23 @@ import select
 import socket
 import sys
 import errno
-import ClientsManager
+from ServerClient import ServerClient
 
+class Server(object):
 
-class HttpServer(object):
-
-    def __init__(self, port, http_handlers, timeout=15):
+    def __init__(self, port, timeout=15):
         self.port = port
         self.server = None
         self.poller = None
         self.pollmask = select.EPOLLIN | select.EPOLLHUP | select.EPOLLERR
-        self.client_manager = None
-        self.http_handlers = http_handlers
         self.idle_timeout = timeout
+        self.clientList = {}
 
     def start_server(self):
         self.server = self.__create_server_socket()
         self.poller = select.epoll()  # Use epoll as polling mechanism instead of raw select().
         self.poller.register(self.server, self.pollmask)   # Tell epoll we want to listen to our server socket for IO events.
-        self.client_manager = ClientsManager.HttpClientsManager(self.http_handlers, self.poller.unregister)
+        print "Server has started on port ", self.port
         self.__event_loop()
 
     def __event_loop(self):
@@ -29,6 +27,7 @@ class HttpServer(object):
             try:
                 self.__event_loop_single(self.poller.poll(timeout=1))
             except Exception as e:
+                print e
                 print str(e)
                 print "Continuing event loop..."
 
@@ -46,18 +45,17 @@ class HttpServer(object):
                 # If it is a client sending us data, then go handle them too.
                 self.__handle_existing_client(socketnum)
 
-        self.client_manager.remove_older_than(self.idle_timeout)
-
-    def __handle_existing_client(self, client):
-        if client in self.client_manager:
-            self.client_manager.read_from_client(client)
+    def __handle_existing_client(self, fd):
+        if fd in self.clientList:
+            self.clientList[fd].read_all_available()
 
     def __handle_new_clients(self):
         try:
             while True:
                 client, addr = self.server.accept()  # Accept the client
+                print "Accepting new client {}, {}".format(client.fileno(), addr)
                 client.setblocking(0)     # Make certain that the client will not block
-                self.client_manager[client.fileno()] = client
+                self.clientList[client.fileno()] = ServerClient(client)
                 self.poller.register(client.fileno(), self.pollmask)  # Begin listening to the client.
         except socket.error, (value, message):
             if value == errno.EAGAIN or errno.EWOULDBLOCK:
@@ -70,8 +68,7 @@ class HttpServer(object):
             self.server = self.__create_server_socket()
             self.poller.register(self.server, self.pollmask)  # ...in which case we reconnect.
         else:
-            # Otherwise tell the client_manager to get rid of the bad egg.
-            self.client_manager.__mark_for_deletion(client)
+            del self.clientList[client.fileno()]
 
 
     def __create_server_socket(self):
